@@ -50,18 +50,6 @@ FdoSelectionManager::FdoSelectionManager():
 {
     qCDebug(SNIPROXY) << "starting";
 
-    //we may end up calling QCoreApplication::quit() in this method, at which point we need the event loop running
-    QTimer::singleShot(0, this, &FdoSelectionManager::init);
-}
-
-FdoSelectionManager::~FdoSelectionManager()
-{
-    qCDebug(SNIPROXY) << "closing";
-    m_selectionOwner->release();
-}
-
-void FdoSelectionManager::init()
-{
     //load damage extension
     xcb_connection_t *c = QX11Info::connection();
     xcb_prefetch_extension_data(c, &xcb_damage_id);
@@ -77,15 +65,21 @@ void FdoSelectionManager::init()
 
     qApp->installNativeEventFilter(this);
 
+    m_selectionOwner->claim(false);
     connect(m_selectionOwner, &KSelectionOwner::claimedOwnership, this, &FdoSelectionManager::onClaimedOwnership);
     connect(m_selectionOwner, &KSelectionOwner::failedToClaimOwnership, this, &FdoSelectionManager::onFailedToClaimOwnership);
     connect(m_selectionOwner, &KSelectionOwner::lostOwnership, this, &FdoSelectionManager::onLostOwnership);
-    m_selectionOwner->claim(false);
+}
+
+FdoSelectionManager::~FdoSelectionManager()
+{
+    qCDebug(SNIPROXY) << "closing";
+    m_selectionOwner->release();
 }
 
 void FdoSelectionManager::addDamageWatch(xcb_window_t client)
 {
-    qCDebug(SNIPROXY) << "adding damage watch for" << client;
+    qCDebug(SNIPROXY) << "adding damage watch for " << client;
 
     xcb_connection_t *c = QX11Info::connection();
     const auto attribsCookie = xcb_get_window_attributes_unchecked(c, client);
@@ -147,7 +141,7 @@ bool FdoSelectionManager::nativeEventFilter(const QByteArray& eventType, void* m
 
 void FdoSelectionManager::dock(xcb_window_t winId)
 {
-    qCDebug(SNIPROXY) << "trying to dock window" << winId;
+    qCDebug(SNIPROXY) << "trying to dock window " << winId;
 
     if (m_proxies.contains(winId)) {
         return;
@@ -159,7 +153,7 @@ void FdoSelectionManager::dock(xcb_window_t winId)
 
 void FdoSelectionManager::undock(xcb_window_t winId)
 {
-    qCDebug(SNIPROXY) << "trying to undock window" << winId;
+    qCDebug(SNIPROXY) << "trying to undock window " << winId;
 
     if (!m_proxies.contains(winId)) {
         return;
@@ -184,3 +178,5 @@ void FdoSelectionManager::onLostOwnership()
     qCWarning(SNIPROXY) << "lost ownership of Systray Manager";
     qApp->exit(-1);
 }
+
+

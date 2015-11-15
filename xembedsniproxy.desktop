@@ -1,6 +1,23 @@
 [Desktop Entry]
 Exec=xembedsniproxy
 Name=XembedSniProxy
+Name[ca]=XembedSniProxy
+Name[ca@valencia]=XembedSniProxy
+Name[en_GB]=XembedSniProxy
+Name[es]=XembedSniProxy
+Name[fi]=XembedSniProxy
+Name[gl]=XembedSniProxy
+Name[ko]=XembedSniProxy
+Name[nl]=XembedSniProxy
+Name[nn]=XembedSniProxy
+Name[pl]=XembedSniProxy
+Name[pt]=XembedSniProxy
+Name[pt_BR]=XembedSniProxy
+Name[sk]=XembedSniProxy
+Name[sl]=XembedSniProxy
+Name[sv]=XembedSniProxy
+Name[uk]=XembedSniProxy
+Name[x-test]=xxXembedSniProxyxx
 Type=Application
 X-KDE-StartupNotify=false
 OnlyShowIn=KDE;
