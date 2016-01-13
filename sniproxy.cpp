@@ -33,7 +33,7 @@
 #include <QGuiApplication>
 #include <QTimer>
 
-#include <QPainter>
+#include <QBitmap>
 
 #include <KWindowSystem>
 #include <netwm.h>
@@ -88,7 +88,8 @@ SNIProxy::SNIProxy(xcb_window_t wid, QObject* parent):
     auto c = QX11Info::connection();
 
     auto cookie = xcb_get_geometry(c, m_windowId);
-    QScopedPointer<xcb_get_geometry_reply_t> clientGeom(xcb_get_geometry_reply(c, cookie, Q_NULLPTR));
+    QScopedPointer<xcb_get_geometry_reply_t, QScopedPointerPodDeleter>
+        clientGeom(xcb_get_geometry_reply(c, cookie, Q_NULLPTR));
 
     //create a container window
     auto screen = xcb_setup_roots_iterator (xcb_get_setup (c)).data;
@@ -157,23 +158,30 @@ SNIProxy::SNIProxy(xcb_window_t wid, QObject* parent):
                              windowMoveConfigVals);
 
 
+    QSize clientWindowSize;
+
+    if (clientGeom) {
+        clientWindowSize = QSize(clientGeom->width, clientGeom->height);
+    }
     //if the window is a clearly stupid size resize to be something sensible
     //this is needed as chormium and such when resized just fill the icon with transparent space and only draw in the middle
     //however spotify does need this as by default the window size is 900px wide.
     //use an artbitrary heuristic to make sure icons are always sensible
-    if (clientGeom->width > s_embedSize || clientGeom->height > s_embedSize )
+    if (clientWindowSize.isEmpty() || clientWindowSize.width() > s_embedSize || clientWindowSize.height() > s_embedSize )
     {
+	qCDebug(SNIPROXY) << "Resizing window" << wid << Title() << "from w*h" << clientWindowSize;
+
         const uint32_t windowMoveConfigVals[2] = { s_embedSize, s_embedSize };
         xcb_configure_window(c, wid,
                                 XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
                                 windowMoveConfigVals);
-	qCDebug(SNIPROXY) << "Resizing window" << wid << Title() << "from w*h" << clientGeom->width << clientGeom->height;
+        clientWindowSize = QSize(s_embedSize, s_embedSize);
     }
 
     //show the embedded window otherwise nothing happens
     xcb_map_window(c, wid);
 
-    xcb_clear_area(c, 0, wid, 0, 0, qMin(clientGeom->width, s_embedSize), qMin(clientGeom->height, s_embedSize));
+    xcb_clear_area(c, 0, wid, 0, 0, clientWindowSize.width(), clientWindowSize.height());
 
     xcb_flush(c);
 
@@ -185,64 +193,149 @@ SNIProxy::SNIProxy(xcb_window_t wid, QObject* parent):
 
 SNIProxy::~SNIProxy()
 {
+    auto c = QX11Info::connection();
+
+    xcb_destroy_window(c, m_containerWid);
     QDBusConnection::disconnectFromBus(m_dbus.name());
 }
 
 void SNIProxy::update()
 {
     const QImage image = getImageNonComposite();
+    if (image.isNull()) {
+        qCDebug(SNIPROXY) << "No xembed icon for" << m_windowId << Title();
+        return;
+    }
 
     int w = image.width();
     int h = image.height();
 
-    // check for the center and sub-center pixels first and avoid full image scan
-    bool isTransparentImage = qAlpha(image.pixel(w >> 1, h >> 1)) + qAlpha(image.pixel(w >> 2, h >> 2)) == 0;
-
-    // skip scan altogether if sub-center pixel found to be opaque
-    // and break out from the outer loop too on full scan
-    for (int x = 0; x < w && isTransparentImage; ++x) {
-	for (int y = 0; y < h; ++y) {
-	    if (qAlpha(image.pixel(x, y))) {
-		// Found an opaque pixel.
-		isTransparentImage = false;
-		break;
-	    }
-	}
+    m_pixmap = QPixmap::fromImage(image);
+    if (w != s_embedSize || h != s_embedSize) {
+        qCDebug(SNIPROXY) << "Scaling pixmap of window" << m_windowId << Title() << "from w*h" << w << h;
+        m_pixmap = m_pixmap.scaled(s_embedSize, s_embedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     }
-
-    // Update icon only if it is at least partially opaque.
-    // This is just a workaround for X11 bug: xembed icon may suddenly
-    // become transparent for a one or few frames. Reproducible at least
-    // with WINE applications.
-    if (!isTransparentImage) {
-        m_pixmap = QPixmap::fromImage(image);
-	if (w != s_embedSize || h != s_embedSize) {
-	    qCDebug(SNIPROXY) << "Scaling pixmap of window" << m_windowId << Title() << "from w*h" << w << h;
-	    m_pixmap = m_pixmap.scaled(s_embedSize, s_embedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-	}
-        emit NewIcon();
-        emit NewToolTip();
-    }
-    else {
-        qCDebug(SNIPROXY) << "Skip transparent xembed icon for" << m_windowId << Title();
-    }
+    emit NewIcon();
+    emit NewToolTip();
 }
 
 void sni_cleanup_xcb_image(void *data) {
     xcb_image_destroy(static_cast<xcb_image_t*>(data));
 }
 
-QImage SNIProxy::getImageNonComposite()
+bool SNIProxy::isTransparentImage(const QImage& image) const
+{
+    int w = image.width();
+    int h = image.height();
+
+    // check for the center and sub-center pixels first and avoid full image scan
+    if (! (qAlpha(image.pixel(w >> 1, h >> 1)) + qAlpha(image.pixel(w >> 2, h >> 2)) == 0))
+        return false;
+
+    // skip scan altogether if sub-center pixel found to be opaque
+    // and break out from the outer loop too on full scan
+    for (int x = 0; x < w; ++x) {
+        for (int y = 0; y < h; ++y) {
+            if (qAlpha(image.pixel(x, y))) {
+                // Found an opaque pixel.
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+QImage SNIProxy::getImageNonComposite() const
 {
     auto c = QX11Info::connection();
     auto cookie = xcb_get_geometry(c, m_windowId);
-    QScopedPointer<xcb_get_geometry_reply_t> geom(xcb_get_geometry_reply(c, cookie, Q_NULLPTR));
+    QScopedPointer<xcb_get_geometry_reply_t, QScopedPointerPodDeleter>
+        geom(xcb_get_geometry_reply(c, cookie, Q_NULLPTR));
+
+    if (!geom) {
+        return QImage();
+    }
 
     xcb_image_t *image = xcb_image_get(c, m_windowId, 0, 0, geom->width, geom->height, 0xFFFFFF, XCB_IMAGE_FORMAT_Z_PIXMAP);
 
-    QImage qimage(image->data, image->width, image->height, image->stride, QImage::Format_ARGB32, sni_cleanup_xcb_image, image);
+    // Don't hook up cleanup yet, we may use a different QImage after all
+    QImage naiveConversion = QImage(image->data, image->width, image->height, QImage::Format_ARGB32);
 
-    return qimage;
+    if (isTransparentImage(naiveConversion)) {
+        QImage elaborateConversion = QImage(convertFromNative(image));
+
+        // Update icon only if it is at least partially opaque.
+        // This is just a workaround for X11 bug: xembed icon may suddenly
+        // become transparent for a one or few frames. Reproducible at least
+        // with WINE applications.
+        if (isTransparentImage(elaborateConversion)) {
+            qCDebug(SNIPROXY) << "Skip transparent xembed icon for" << m_windowId << Title();
+            return QImage();
+        } else
+            return elaborateConversion;
+    } else {
+        // Now we are sure we can eventually delete the xcb_image_t with this version
+        return QImage(image->data, image->width, image->height, image->stride, QImage::Format_ARGB32, sni_cleanup_xcb_image, image);
+    }
+}
+
+QImage SNIProxy::convertFromNative(xcb_image_t *xcbImage) const
+{
+    QImage::Format format = QImage::Format_Invalid;
+
+    switch (xcbImage->depth) {
+    case 1:
+        format = QImage::Format_MonoLSB;
+        break;
+    case 16:
+        format = QImage::Format_RGB16;
+        break;
+    case 24:
+        format = QImage::Format_RGB32;
+        break;
+    case 30: {
+        // Qt doesn't have a matching image format. We need to convert manually
+        quint32 *pixels = reinterpret_cast<quint32 *>(xcbImage->data);
+        for (uint i = 0; i < (xcbImage->size / 4); i++) {
+            int r = (pixels[i] >> 22) & 0xff;
+            int g = (pixels[i] >> 12) & 0xff;
+            int b = (pixels[i] >>  2) & 0xff;
+
+            pixels[i] = qRgba(r, g, b, 0xff);
+        }
+        // fall through, Qt format is still Format_ARGB32_Premultiplied
+    }
+    case 32:
+        format = QImage::Format_ARGB32_Premultiplied;
+        break;
+    default:
+        return QImage(); // we don't know
+    }
+
+    QImage image(xcbImage->data, xcbImage->width, xcbImage->height, xcbImage->stride, format, sni_cleanup_xcb_image, xcbImage);
+
+    if (image.isNull()) {
+        return QImage();
+    }
+
+    if (format == QImage::Format_RGB32 && xcbImage->bpp == 32)
+    {
+        QImage m = image.createHeuristicMask();
+        QBitmap mask(QPixmap::fromImage(m));
+        QPixmap p = QPixmap::fromImage(image);
+        p.setMask(mask);
+        image = p.toImage();
+    }
+
+    // work around an abort in QImage::color
+    if (image.format() == QImage::Format_MonoLSB) {
+        image.setColorCount(2);
+        image.setColor(0, QColor(Qt::white).rgb());
+        image.setColor(1, QColor(Qt::black).rgb());
+    }
+
+    return image;
 }
 
 //____________properties__________
@@ -325,10 +418,12 @@ void SNIProxy::sendClick(uint8_t mouseButton, int x, int y)
     auto c = QX11Info::connection();
 
     auto cookieSize = xcb_get_geometry(c, m_windowId);
-    QScopedPointer<xcb_get_geometry_reply_t> clientGeom(xcb_get_geometry_reply(c, cookieSize, Q_NULLPTR));
+    QScopedPointer<xcb_get_geometry_reply_t, QScopedPointerPodDeleter>
+        clientGeom(xcb_get_geometry_reply(c, cookieSize, Q_NULLPTR));
 
     auto cookie = xcb_query_pointer(c, m_windowId);
-    QScopedPointer<xcb_query_pointer_reply_t> pointer(xcb_query_pointer_reply(c, cookie, Q_NULLPTR));
+    QScopedPointer<xcb_query_pointer_reply_t, QScopedPointerPodDeleter>
+        pointer(xcb_query_pointer_reply(c, cookie, Q_NULLPTR));
     /*qCDebug(SNIPROXY) << "samescreen" << pointer->same_screen << endl
 	<< "root x*y" << pointer->root_x << pointer->root_y << endl
 	<< "win x*y" << pointer->win_x << pointer->win_y;*/
@@ -373,7 +468,7 @@ void SNIProxy::sendClick(uint8_t mouseButton, int x, int y)
         event->detail = mouseButton;
 
         xcb_send_event(c, false, m_windowId, XCB_EVENT_MASK_BUTTON_PRESS, (char *) event);
-        free(event);
+        delete event;
     }
 
     //mouse up
@@ -394,7 +489,7 @@ void SNIProxy::sendClick(uint8_t mouseButton, int x, int y)
         event->detail = mouseButton;
 
         xcb_send_event(c, false, m_windowId, XCB_EVENT_MASK_BUTTON_RELEASE, (char *) event);
-        free(event);
+        delete event;
     }
 
 #ifndef VISUAL_DEBUG
